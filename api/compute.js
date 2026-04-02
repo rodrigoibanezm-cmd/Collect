@@ -2,8 +2,8 @@
 
 export default async function handler(req, res) {
   try {
-    const DATA_URL = "PEGA_URL_DATA_JSON";
-    const SCHEMA_URL = "PEGA_URL_SCHEMA_JSON";
+    const DATA_URL = "https://e7wkccr8ur62hidd.private.blob.vercel-storage.com/data.json";
+    const SCHEMA_URL = "https://e7wkccr8ur62hidd.private.blob.vercel-storage.com/schema_final.json";
 
     const [dataRes, schemaRes] = await Promise.all([
       fetch(DATA_URL),
