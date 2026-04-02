@@ -26,24 +26,29 @@ export default async function handler(req, res) {
     const [sKey, s] = entries[1];
 
     const diffScore = w.score_compuesto - s.score_compuesto;
+    const absDiff = Math.abs(diffScore);
 
-    // 🔴 driver
-    const diffClaridad = (w.claridad ?? 0) - (s.claridad ?? 0);
-    const diffAtractivo = (w.atractivo ?? 0) - (s.atractivo ?? 0);
+    // 🔴 driver (con control de empate real)
+    const diffClaridad = w.claridad - s.claridad;
+    const diffAtractivo = w.atractivo - s.atractivo;
 
-    const driver =
-      Math.abs(diffAtractivo) > Math.abs(diffClaridad)
-        ? "atractivo"
-        : "claridad";
+    let driver = null;
 
-    // 🔴 reglas de decisión
+    if (!(diffClaridad === 0 && diffAtractivo === 0)) {
+      driver =
+        Math.abs(diffAtractivo) > Math.abs(diffClaridad)
+          ? "atractivo"
+          : "claridad";
+    }
+
+    // 🔴 reglas de decisión (con absoluto)
     let tipo_resultado = "diferencia_clara";
     let confianza = "alta";
 
-    if (Math.abs(diffScore) < 0.05) {
+    if (absDiff < 0.05) {
       tipo_resultado = "empate";
       confianza = "baja";
-    } else if (diffScore < 0.2) {
+    } else if (absDiff < 0.2) {
       tipo_resultado = "diferencia_no_concluyente";
       confianza = "media";
     }
