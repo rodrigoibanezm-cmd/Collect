@@ -10,15 +10,16 @@ export default async function handler(req, res) {
     const { data, schema } = await loadInputs(DATA_URL, SCHEMA_URL);
     const result = compute(data, schema);
 
-    // 🔴 interpretación pura (sin cálculo)
-
-    const entries = Object.entries(result)
-      .filter(([_, v]) => v.score_compuesto !== null);
+    // 🔴 filtrar opciones válidas
+    const entries = Object.entries(result).filter(
+      ([_, v]) => v.score_compuesto !== null
+    );
 
     if (entries.length < 2) {
-      throw new Error("No hay datos suficientes");
+      throw new Error("No hay datos suficientes para comparar");
     }
 
+    // ordenar
     entries.sort((a, b) => b[1].score_compuesto - a[1].score_compuesto);
 
     const [wKey, w] = entries[0];
@@ -26,25 +27,41 @@ export default async function handler(req, res) {
 
     const diffScore = w.score_compuesto - s.score_compuesto;
 
-    const diffClaridad = w.claridad - s.claridad;
-    const diffAtractivo = w.atractivo - s.atractivo;
+    // 🔴 driver
+    const diffClaridad = (w.claridad ?? 0) - (s.claridad ?? 0);
+    const diffAtractivo = (w.atractivo ?? 0) - (s.atractivo ?? 0);
 
     const driver =
       Math.abs(diffAtractivo) > Math.abs(diffClaridad)
         ? "atractivo"
         : "claridad";
 
-    res.status(200).json({
+    // 🔴 reglas de decisión
+    let tipo_resultado = "diferencia_clara";
+    let confianza = "alta";
+
+    if (Math.abs(diffScore) < 0.05) {
+      tipo_resultado = "empate";
+      confianza = "baja";
+    } else if (diffScore < 0.2) {
+      tipo_resultado = "diferencia_no_concluyente";
+      confianza = "media";
+    }
+
+    return res.status(200).json({
       status: "ok",
       decision: {
-        ganador: wKey,
+        ganador: tipo_resultado === "empate" ? null : wKey,
+        tipo_resultado,
+        confianza,
         driver,
-        diferencia_score: Number(diffScore.toFixed(4)),
-        diferencia_relevante: diffScore > 0.2
+        diferencia_score: Number(diffScore.toFixed(4))
       }
     });
 
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    return res.status(500).json({
+      error: err.message,
+    });
   }
 }
