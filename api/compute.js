@@ -9,6 +9,10 @@ const MAX_SCHEMA_BYTES = 200_000;
 const FETCH_TIMEOUT = 8000;
 const MAX_RETRIES = 2;
 
+// 🔴 DATA DESDE BLOB (FIJO)
+const DATA_URL = "https://e7wkccr8ur62hidd.private.blob.vercel-storage.com/data.json";
+const SCHEMA_URL = "https://e7wkccr8ur62hidd.private.blob.vercel-storage.com/Schema_operativo.json";
+
 export default async function handler(req, res) {
   const start = Date.now();
   const trace_id = crypto.randomUUID();
@@ -22,25 +26,6 @@ export default async function handler(req, res) {
   }
 
   try {
-    if (!req.body) {
-      return res.status(400).json({ error: "missing_body", trace_id });
-    }
-
-    const { DATA_URL, SCHEMA_URL } = req.body;
-
-    // 🔴 URL validation
-    const validateURL = (u) => {
-      try {
-        const url = new URL(u);
-        return url.protocol === "https:";
-      } catch {
-        return false;
-      }
-    };
-
-    if (!validateURL(DATA_URL) || !validateURL(SCHEMA_URL)) {
-      return res.status(400).json({ error: "invalid_url", trace_id });
-    }
 
     // 🔴 fetch con retry correcto
     const fetchSafe = async (url, isSchema = false) => {
@@ -51,7 +36,6 @@ export default async function handler(req, res) {
         try {
           const r = await fetch(url, { signal: controller.signal });
 
-          // ❌ no retry en 4xx
           if (r.status >= 400 && r.status < 500) {
             throw new Error(`client_error_${r.status}`);
           }
@@ -60,8 +44,11 @@ export default async function handler(req, res) {
 
           const text = await r.text();
 
-          if (isSchema && Buffer.byteLength(text, "utf8") > MAX_SCHEMA_BYTES) {
-            throw new Error("schema_too_large");
+          if (isSchema) {
+            const size = new TextEncoder().encode(text).length;
+            if (size > MAX_SCHEMA_BYTES) {
+              throw new Error("schema_too_large");
+            }
           }
 
           try {
@@ -107,7 +94,7 @@ export default async function handler(req, res) {
       throw new Error("missing_invariants");
     }
 
-    // 🔴 evitar mutación (sin structuredClone)
+    // 🔴 evitar mutación
     const dataSafe = data.map(r => ({ ...r }));
 
     // 🔴 applyContract
@@ -133,13 +120,28 @@ export default async function handler(req, res) {
       throw new Error("missing_metadata");
     }
 
-    // 🔴 validar opciones (SEMÁNTICA)
-    for (const o of prepared.opciones) {
-      if (!o.option_id) throw new Error("invalid_option_id");
-      if (typeof o.n !== "number" || o.n < 0) throw new Error("invalid_n");
+    const { opciones, metadata: m } = prepared;
+
+    // 🔴 validar opciones
+    const ids = new Set();
+
+    for (const o of opciones) {
+      if (typeof o.option_id !== "string" || o.option_id.length === 0) {
+        throw new Error("invalid_option_id");
+      }
+
+      if (ids.has(o.option_id)) {
+        throw new Error("duplicate_option_id");
+      }
+      ids.add(o.option_id);
+
+      if (typeof o.n !== "number" || !Number.isInteger(o.n) || o.n < 0) {
+        throw new Error("invalid_n");
+      }
+
       if (
         typeof o.share !== "number" ||
-        isNaN(o.share) ||
+        !Number.isFinite(o.share) ||
         o.share < 0 ||
         o.share > 1
       ) {
@@ -148,20 +150,41 @@ export default async function handler(req, res) {
     }
 
     // 🔴 validar shares
-    const sumShares = prepared.opciones.reduce((a, o) => a + o.share, 0);
+    const sumShares = opciones.reduce((a, o) => a + o.share, 0);
     if (Math.abs(sumShares - 1) > 0.00001) {
       throw new Error("invalid_share_sum");
     }
 
-    // 🔴 metadata consistente
-    const m = prepared.metadata;
+    // 🔴 validar suma n
+    const sumN = opciones.reduce((a, o) => a + o.n, 0);
+    if (sumN !== m.universo_final) {
+      throw new Error("invalid_n_sum");
+    }
 
+    // 🔴 consistencia share vs n
+    if (m.universo_final > 0) {
+      for (const o of opciones) {
+        const expected = o.n / m.universo_final;
+        if (Math.abs(expected - o.share) > 0.00001) {
+          throw new Error("share_mismatch");
+        }
+      }
+    }
+
+    // 🔴 metadata
     if (m.universo_final < 0) throw new Error("invalid_universe");
     if (m.n_raw < m.universo_final) throw new Error("invalid_counts");
 
-    // 🔴 límite opciones
-    if (prepared.opciones.length > schema.invariants.max_options) {
+    // 🔴 límites
+    if (opciones.length > schema.invariants.max_options) {
       throw new Error("too_many_options");
+    }
+
+    if (
+      schema.invariants.minimum_options &&
+      opciones.length < schema.invariants.minimum_options
+    ) {
+      throw new Error("not_enough_options");
     }
 
     // 🔴 warnings saneados
