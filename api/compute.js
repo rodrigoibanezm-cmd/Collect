@@ -1,15 +1,13 @@
 // /api/compute.js
 import crypto from "crypto";
-import { head } from "@vercel/blob";
+import fs from "fs/promises";
+import path from "path";
 
 import { validateRuntime } from "../lib/runtime/validateRuntime.js";
 import { validatePrepared } from "../lib/runtime/validatePrepared.js";
 
 import { applyContract } from "../lib/ingest/applyContract.js";
 import { computeDiagnostico } from "../lib/engine/diagnostico.js";
-
-const DATA_BLOB_PATH = "data.json";
-const SCHEMA_BLOB_PATH = "Schema_operativo.json";
 
 const MAX_DATA_ROWS = 1_000_000;
 const MAX_SCHEMA_BYTES = 200_000;
@@ -26,47 +24,27 @@ function respondError(res, type, detail, trace_id) {
   return res.status(status).json({ error: type, detail, trace_id });
 }
 
-async function readBlobJson(path, { maxBytes = null } = {}) {
-  let blob;
+async function readJsonFile(relativePath, { maxBytes = null } = {}) {
+  const absolutePath = path.join(process.cwd(), relativePath);
 
+  let text;
   try {
-    blob = await head(path);
+    text = await fs.readFile(absolutePath, "utf8");
   } catch {
-    throw new Error(`fetch_error:blob_not_found:${path}`);
+    throw new Error(`fetch_error:file_not_found:${relativePath}`);
   }
-
-  if (!blob?.url) {
-    throw new Error(`fetch_error:blob_url_missing:${path}`);
-  }
-
-  if (maxBytes !== null && typeof blob.size === "number" && blob.size > maxBytes) {
-    throw new Error(`fetch_error:blob_too_large:${path}`);
-  }
-
-  let response;
-  try {
-    response = await fetch(blob.url);
-  } catch {
-    throw new Error(`fetch_error:blob_fetch_failed:${path}`);
-  }
-
-  if (!response.ok) {
-    throw new Error(`fetch_error:blob_http_${response.status}:${path}`);
-  }
-
-  const text = await response.text();
 
   if (maxBytes !== null) {
     const size = new TextEncoder().encode(text).length;
     if (size > maxBytes) {
-      throw new Error(`fetch_error:blob_too_large:${path}`);
+      throw new Error(`fetch_error:file_too_large:${relativePath}`);
     }
   }
 
   try {
     return JSON.parse(text);
   } catch {
-    throw new Error(`fetch_error:invalid_json:${path}`);
+    throw new Error(`fetch_error:invalid_json:${relativePath}`);
   }
 }
 
@@ -82,8 +60,8 @@ export default async function handler(req, res) {
     let data, schema;
     try {
       [data, schema] = await Promise.all([
-        readBlobJson(DATA_BLOB_PATH),
-        readBlobJson(SCHEMA_BLOB_PATH, { maxBytes: MAX_SCHEMA_BYTES })
+        readJsonFile("data/data.json"),
+        readJsonFile("data/Schema_operativo.json", { maxBytes: MAX_SCHEMA_BYTES })
       ]);
     } catch (e) {
       return respondError(res, "fetch_error", e.message, trace_id);
