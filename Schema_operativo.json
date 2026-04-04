@@ -1,0 +1,217 @@
+{
+  "contract_id": "choice_preference_v1",
+  "contract_version": "1.2.1",
+
+  "input_contract": {
+    "dataset": {
+      "source": "blob_url",
+      "snapshot_id": "string",
+      "timestamp": "ISO-8601",
+      "encoding": "utf-8"
+    },
+    "unit_id": "respondent_id",
+    "target_variable": "P11_A",
+    "structure": {
+      "grain": "1_row_per_respondent",
+      "fields": {
+        "respondent_id": {
+          "type": "string",
+          "nullable": false
+        },
+        "P11_A": {
+          "type": "integer",
+          "allowed_values": "dynamic",
+          "max_distinct_values": 10,
+          "fail_if_exceeds": true,
+          "missing_values": [90, 99],
+          "excluded_values": [],
+          "nullable": false
+        }
+      }
+    }
+  },
+
+  "normalization_contract": {
+    "enabled": true,
+    "rules": {
+      "trim_strings": true,
+      "cast_numbers": true,
+      "lowercase_strings": true
+    }
+  },
+
+  "validation_contract": {
+    "execution_order": [
+      "type_check",
+      "cardinality",
+      "missing",
+      "invalid",
+      "excluded"
+    ],
+    "cardinality": {
+      "P11_A": {
+        "min_responses": 0,
+        "max_responses": 1,
+        "enforce_uniqueness": true
+      }
+    },
+    "type_check": {
+      "strict": false,
+      "coercion": true
+    },
+    "duplicate_control": {
+      "by": "respondent_id",
+      "rule": "fail_if_duplicate"
+    },
+    "missing_handling": {
+      "rule": "exclude_case"
+    },
+    "invalid_handling": {
+      "out_of_range": "exclude_case",
+      "multiple_valid": "exclude_case",
+      "null_with_valid": "exclude_case"
+    },
+    "excluded_handling": {
+      "rule": "exclude_case",
+      "stage": "after_invalid"
+    },
+    "error_policy": {
+      "mode": "strict",
+      "fail_on_error": true
+    }
+  },
+
+  "transformation_contract": {
+    "method": "single_choice_count",
+    "mapping": {
+      "type": "deterministic",
+      "option_id": "normalized_value",
+      "label": {
+        "priority": ["lookup", "raw"],
+        "fallback": "raw"
+      },
+      "persist_mapping": true
+    },
+    "unit": "respondent",
+    "rule": "exactly_one_valid_response_per_respondent"
+  },
+
+  "aggregation_contract": {
+    "level": "option",
+    "metrics": {
+      "n": {
+        "type": "count",
+        "denominator": "universo_final",
+        "type_limit": "int64"
+      }
+    }
+  },
+
+  "derivation_contract": {
+    "share": {
+      "formula": "n / universo_final",
+      "precision_internal": 10,
+      "precision_output": 6,
+      "rounding": "half_up",
+      "constraints": {
+        "sum_equals_1": true,
+        "tolerance": 0.000001
+      }
+    }
+  },
+
+  "segmentation_contract": {
+    "enabled": false,
+    "segments": [],
+    "rules": {
+      "type": "filter_deterministic",
+      "unit_scope": "recalculate_per_segment",
+      "min_n": 30
+    }
+  },
+
+  "output_contract": {
+    "structure": {
+      "options": [
+        {
+          "option_id": "string",
+          "label": "string",
+          "n": "integer",
+          "share": "float"
+        }
+      ],
+      "metadata": {
+        "n_raw": "integer",
+        "n_total": "integer",
+        "n_valid": "integer",
+        "n_missing": "integer",
+        "n_invalid": "integer",
+        "n_excluded": "integer",
+        "n_transformed": "integer",
+        "n_failed_transformation": "integer",
+        "universo_final": "integer"
+      },
+      "warnings": {
+        "dataset_level": [],
+        "option_level": {
+          "option_id": "string",
+          "warnings": []
+        }
+      },
+      "status": {
+        "type": "enum",
+        "rules": {
+          "valid": "universo_final >= min_required AND n_options >= 2",
+          "insufficient": "universo_final < min_required OR n_options < 2",
+          "invalid": "execution_error OR universo_final = 0"
+        }
+      }
+    },
+    "ordering": {
+      "by": "n",
+      "direction": "desc",
+      "stable": true
+    },
+    "tie_rule": {
+      "type": "practical_significance",
+      "unit": "share_diff",
+      "threshold": 0.02,
+      "stage": "post_aggregation",
+      "scope": "result_only"
+    }
+  },
+
+  "invariants": {
+    "determinism": true,
+    "idempotence": true,
+    "no_side_effects": true,
+    "sum_of_shares_equals_1": true,
+    "minimum_options": 2,
+    "max_options": 10,
+    "allow_single_option": false
+  },
+
+  "control_contract": {
+    "universo_final_definition": "valid_respondents_after_all_exclusions",
+    "min_required": 30,
+    "on_less_than_min_options": "status_insufficient"
+  },
+
+  "execution_contract": {
+    "pipeline": [
+      "input",
+      "normalization",
+      "validation",
+      "transformation",
+      "aggregation",
+      "derivation",
+      "control",
+      "output"
+    ],
+    "logging": {
+      "enabled": true,
+      "level": "configurable",
+      "trace_id": true
+    }
+  }
+}
