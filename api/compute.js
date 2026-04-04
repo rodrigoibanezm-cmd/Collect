@@ -1,20 +1,21 @@
 // /api/compute.js
 
 import crypto from "crypto";
+import { head, list } from "@vercel/blob";
 
-import { fetchSafe } from "../lib/runtime/fetchSafe.js";
 import { validateRuntime } from "../lib/runtime/validateRuntime.js";
 import { validatePrepared } from "../lib/runtime/validatePrepared.js";
 
 import { applyContract } from "../lib/ingest/applyContract.js";
 import { computeDiagnostico } from "../lib/engine/diagnostico.js";
 
-// 🔴 DATA DESDE BLOB (FIJO)
-const DATA_URL = "https://e7wkccr8ur62hidd.private.blob.vercel-storage.com/data.json";
-const SCHEMA_URL = "https://e7wkccr8ur62hidd.private.blob.vercel-storage.com/Schema_operativo.json";
+// 🔴 nombres lógicos en Blob
+const DATA_BLOB_PATH = "data.json";
+const SCHEMA_BLOB_PATH = "Schema_operativo.json";
 
 // 🔴 límite data
 const MAX_DATA_ROWS = 1_000_000;
+const MAX_SCHEMA_BYTES = 200_000;
 
 // 🔴 helper HTTP consistente
 function respondError(res, type, detail, trace_id) {
@@ -29,6 +30,51 @@ function respondError(res, type, detail, trace_id) {
   return res.status(status).json({ error: type, detail, trace_id });
 }
 
+// 🔴 leer JSON directo desde Vercel Blob (server-side)
+async function readBlobJson(path, { maxBytes = null } = {}) {
+  let blob;
+
+  try {
+    blob = await head(path);
+  } catch {
+    throw new Error(`fetch_error:blob_not_found:${path}`);
+  }
+
+  if (!blob?.url) {
+    throw new Error(`fetch_error:blob_url_missing:${path}`);
+  }
+
+  if (maxBytes !== null && typeof blob.size === "number" && blob.size > maxBytes) {
+    throw new Error(`fetch_error:blob_too_large:${path}`);
+  }
+
+  let response;
+  try {
+    response = await fetch(blob.url);
+  } catch {
+    throw new Error(`fetch_error:blob_fetch_failed:${path}`);
+  }
+
+  if (!response.ok) {
+    throw new Error(`fetch_error:blob_http_${response.status}:${path}`);
+  }
+
+  const text = await response.text();
+
+  if (maxBytes !== null) {
+    const size = new TextEncoder().encode(text).length;
+    if (size > maxBytes) {
+      throw new Error(`fetch_error:blob_too_large:${path}`);
+    }
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`fetch_error:invalid_json:${path}`);
+  }
+}
+
 export default async function handler(req, res) {
   const trace_id = crypto.randomUUID();
   const start = Date.now();
@@ -38,13 +84,12 @@ export default async function handler(req, res) {
   }
 
   try {
-
-    // 🔴 FETCH
+    // 🔴 FETCH DESDE BLOB SDK
     let data, schema;
     try {
       [data, schema] = await Promise.all([
-        fetchSafe(DATA_URL),
-        fetchSafe(SCHEMA_URL, true)
+        readBlobJson(DATA_BLOB_PATH),
+        readBlobJson(SCHEMA_BLOB_PATH, { maxBytes: MAX_SCHEMA_BYTES })
       ]);
     } catch (e) {
       return respondError(res, "fetch_error", e.message, trace_id);
@@ -138,10 +183,7 @@ export default async function handler(req, res) {
       warnings,
       result
     });
-
   } catch (e) {
-
-    // 🔴 CLASIFICACIÓN FINAL CONSISTENTE
     const type =
       e.message?.startsWith("fetch_error") ? "fetch_error" :
       e.message?.startsWith("runtime_error") ? "runtime_error" :
