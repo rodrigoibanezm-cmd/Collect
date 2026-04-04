@@ -1,193 +1,103 @@
 // /api/compute.js
 
 import crypto from "crypto";
-import { computeDiagnostico } from "../lib/engine/diagnostico.js";
-import { applyContract } from "../lib/ingest/applyContract.js";
 
-const MAX_DATA_ROWS = 1_000_000;
-const MAX_SCHEMA_BYTES = 200_000;
-const FETCH_TIMEOUT = 8000;
-const MAX_RETRIES = 2;
+import { fetchSafe } from "../lib/runtime/fetchSafe.js";
+import { validateRuntime } from "../lib/runtime/validateRuntime.js";
+import { validatePrepared } from "../lib/runtime/validatePrepared.js";
+
+import { applyContract } from "../lib/ingest/applyContract.js";
+import { computeDiagnostico } from "../lib/engine/diagnostico.js";
 
 // 🔴 DATA DESDE BLOB (FIJO)
 const DATA_URL = "https://e7wkccr8ur62hidd.private.blob.vercel-storage.com/data.json";
 const SCHEMA_URL = "https://e7wkccr8ur62hidd.private.blob.vercel-storage.com/Schema_operativo.json";
 
-export default async function handler(req, res) {
-  const start = Date.now();
-  const trace_id = crypto.randomUUID();
+// 🔴 límite data
+const MAX_DATA_ROWS = 1_000_000;
 
-  const log = (stage, info = {}) => {
-    console.log(JSON.stringify({ trace_id, stage, ...info }));
-  };
+// 🔴 helper HTTP consistente
+function respondError(res, type, detail, trace_id) {
+  const status =
+    type === "fetch_error" ? 502 :
+    type === "runtime_error" ? 400 :
+    type === "contract_error" ? 422 :
+    type === "prepared_error" ? 422 :
+    type === "compute_error" ? 422 :
+    500;
+
+  return res.status(status).json({ error: type, detail, trace_id });
+}
+
+export default async function handler(req, res) {
+  const trace_id = crypto.randomUUID();
+  const start = Date.now();
 
   if (req.method !== "POST") {
-    return res.status(405).json({ error: "method_not_allowed", trace_id });
+    return respondError(res, "runtime_error", "method_not_allowed", trace_id);
   }
 
   try {
 
-    // 🔴 fetch con retry correcto
-    const fetchSafe = async (url, isSchema = false) => {
-      for (let i = 0; i <= MAX_RETRIES; i++) {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
+    // 🔴 FETCH
+    let data, schema;
+    try {
+      [data, schema] = await Promise.all([
+        fetchSafe(DATA_URL),
+        fetchSafe(SCHEMA_URL, true)
+      ]);
+    } catch (e) {
+      return respondError(res, "fetch_error", e.message, trace_id);
+    }
 
-        try {
-          const r = await fetch(url, { signal: controller.signal });
-
-          if (r.status >= 400 && r.status < 500) {
-            throw new Error(`client_error_${r.status}`);
-          }
-
-          if (!r.ok) throw new Error(`server_error_${r.status}`);
-
-          const text = await r.text();
-
-          if (isSchema) {
-            const size = new TextEncoder().encode(text).length;
-            if (size > MAX_SCHEMA_BYTES) {
-              throw new Error("schema_too_large");
-            }
-          }
-
-          try {
-            return JSON.parse(text);
-          } catch {
-            throw new Error("invalid_json");
-          }
-
-        } catch (e) {
-          const retryable =
-            e.name === "AbortError" ||
-            e.message.startsWith("server_error");
-
-          if (!retryable || i === MAX_RETRIES) throw e;
-        } finally {
-          clearTimeout(timeout);
-        }
-      }
-    };
-
-    log("fetch_start");
-
-    const [data, schema] = await Promise.all([
-      fetchSafe(DATA_URL),
-      fetchSafe(SCHEMA_URL, true)
-    ]);
-
-    log("fetch_ok", { rows: Array.isArray(data) ? data.length : null });
-
-    // 🔴 runtime checks
-    if (!Array.isArray(data)) throw new Error("invalid_data_shape");
-    if (data.length > MAX_DATA_ROWS) throw new Error("dataset_too_large");
-
+    // 🔴 VALIDAR SCHEMA PARA RESPONSE
     if (!schema?.contract_id || !schema?.contract_version) {
-      throw new Error("invalid_schema");
+      return respondError(res, "runtime_error", "invalid_schema_contract", trace_id);
     }
 
-    if (!schema.contract_version.startsWith("1.")) {
-      throw new Error("unsupported_contract_version");
+    // 🔴 CONTROL TAMAÑO DATA
+    if (!Array.isArray(data)) {
+      return respondError(res, "runtime_error", "invalid_data_shape", trace_id);
     }
 
-    if (!schema?.invariants?.max_options) {
-      throw new Error("missing_invariants");
+    if (data.length > MAX_DATA_ROWS) {
+      return respondError(res, "runtime_error", "dataset_too_large", trace_id);
     }
 
-    // 🔴 evitar mutación
-    const dataSafe = data.map(r => ({ ...r }));
+    // 🔴 VALIDATE RUNTIME
+    try {
+      validateRuntime(data, schema);
+    } catch (e) {
+      return respondError(res, "runtime_error", e.message, trace_id);
+    }
 
-    // 🔴 applyContract
+    // 🔴 CONTRACT
     let prepared;
     try {
-      prepared = applyContract(dataSafe, schema);
-      log("contract_applied");
+      prepared = applyContract(data, schema);
     } catch (e) {
-      return res.status(422).json({
-        error: "contract_failed",
-        detail: e.message,
-        trace_id,
-        stage: "apply_contract"
-      });
+      return respondError(res, "contract_error", e.message, trace_id);
     }
 
-    // 🔴 validar estructura base
-    if (!prepared?.opciones || !Array.isArray(prepared.opciones)) {
-      throw new Error("invalid_contract_output");
+    // 🔴 VALIDATE PREPARED
+    try {
+      validatePrepared(prepared, schema);
+    } catch (e) {
+      return respondError(res, "prepared_error", e.message, trace_id);
     }
 
-    if (!prepared?.metadata) {
-      throw new Error("missing_metadata");
-    }
-
-    const { opciones, metadata: m } = prepared;
-
-    // 🔴 validar opciones
-    const ids = new Set();
-
-    for (const o of opciones) {
-      if (typeof o.option_id !== "string" || o.option_id.length === 0) {
-        throw new Error("invalid_option_id");
-      }
-
-      if (ids.has(o.option_id)) {
-        throw new Error("duplicate_option_id");
-      }
-      ids.add(o.option_id);
-
-      if (typeof o.n !== "number" || !Number.isInteger(o.n) || o.n < 0) {
-        throw new Error("invalid_n");
-      }
-
-      if (
-        typeof o.share !== "number" ||
-        !Number.isFinite(o.share) ||
-        o.share < 0 ||
-        o.share > 1
-      ) {
-        throw new Error("invalid_share");
-      }
-    }
-
-    // 🔴 validar shares
-    const sumShares = opciones.reduce((a, o) => a + o.share, 0);
-    if (Math.abs(sumShares - 1) > 0.00001) {
-      throw new Error("invalid_share_sum");
-    }
-
-    // 🔴 validar suma n
-    const sumN = opciones.reduce((a, o) => a + o.n, 0);
-    if (sumN !== m.universo_final) {
-      throw new Error("invalid_n_sum");
-    }
-
-    // 🔴 consistencia share vs n
-    if (m.universo_final > 0) {
-      for (const o of opciones) {
-        const expected = o.n / m.universo_final;
-        if (Math.abs(expected - o.share) > 0.00001) {
-          throw new Error("share_mismatch");
-        }
-      }
-    }
-
-    // 🔴 metadata
-    if (m.universo_final < 0) throw new Error("invalid_universe");
-    if (m.n_raw < m.universo_final) throw new Error("invalid_counts");
-
-    // 🔴 límites
-    if (opciones.length > schema.invariants.max_options) {
-      throw new Error("too_many_options");
-    }
-
+    // 🔴 VALIDAR METADATA COMPLETA
     if (
-      schema.invariants.minimum_options &&
-      opciones.length < schema.invariants.minimum_options
+      !prepared?.metadata ||
+      typeof prepared.metadata.n_raw !== "number" ||
+      typeof prepared.metadata.universo_final !== "number"
     ) {
-      throw new Error("not_enough_options");
+      return respondError(res, "prepared_error", "invalid_metadata", trace_id);
     }
 
-    // 🔴 warnings saneados
+    const m = prepared.metadata;
+
+    // 🔴 SANEAR WARNINGS
     const warnings = {
       dataset_level: Array.isArray(prepared.warnings?.dataset_level)
         ? prepared.warnings.dataset_level
@@ -197,20 +107,21 @@ export default async function handler(req, res) {
         : []
     };
 
-    log("contract_validated");
-
-    // 🔴 compute
+    // 🔴 COMPUTE
     let result;
     try {
       result = computeDiagnostico(prepared);
-      log("compute_ok");
     } catch (e) {
-      return res.status(422).json({
-        error: "compute_failed",
-        detail: e.message,
-        trace_id,
-        stage: "compute"
-      });
+      return respondError(res, "compute_error", e.message, trace_id);
+    }
+
+    // 🔴 VALIDAR RESULT REAL
+    if (
+      !result ||
+      typeof result !== "object" ||
+      Object.keys(result).length === 0
+    ) {
+      return respondError(res, "compute_error", "invalid_result", trace_id);
     }
 
     return res.status(200).json({
@@ -229,12 +140,16 @@ export default async function handler(req, res) {
     });
 
   } catch (e) {
-    log("fatal_error", { error: e.message });
 
-    return res.status(500).json({
-      error: "internal_error",
-      detail: e.message,
-      trace_id
-    });
+    // 🔴 CLASIFICACIÓN FINAL CONSISTENTE
+    const type =
+      e.message?.startsWith("fetch_error") ? "fetch_error" :
+      e.message?.startsWith("runtime_error") ? "runtime_error" :
+      e.message?.startsWith("contract_error") ? "contract_error" :
+      e.message?.startsWith("prepared_error") ? "prepared_error" :
+      e.message?.startsWith("compute_error") ? "compute_error" :
+      "internal_error";
+
+    return respondError(res, type, e.message, trace_id);
   }
 }
