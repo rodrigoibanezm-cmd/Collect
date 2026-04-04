@@ -1,7 +1,6 @@
 // /api/compute.js
-
 import crypto from "crypto";
-import { head, list } from "@vercel/blob";
+import { head } from "@vercel/blob";
 
 import { validateRuntime } from "../lib/runtime/validateRuntime.js";
 import { validatePrepared } from "../lib/runtime/validatePrepared.js";
@@ -9,15 +8,12 @@ import { validatePrepared } from "../lib/runtime/validatePrepared.js";
 import { applyContract } from "../lib/ingest/applyContract.js";
 import { computeDiagnostico } from "../lib/engine/diagnostico.js";
 
-// 🔴 nombres lógicos en Blob
 const DATA_BLOB_PATH = "data.json";
 const SCHEMA_BLOB_PATH = "Schema_operativo.json";
 
-// 🔴 límite data
 const MAX_DATA_ROWS = 1_000_000;
 const MAX_SCHEMA_BYTES = 200_000;
 
-// 🔴 helper HTTP consistente
 function respondError(res, type, detail, trace_id) {
   const status =
     type === "fetch_error" ? 502 :
@@ -30,7 +26,6 @@ function respondError(res, type, detail, trace_id) {
   return res.status(status).json({ error: type, detail, trace_id });
 }
 
-// 🔴 leer JSON directo desde Vercel Blob (server-side)
 async function readBlobJson(path, { maxBytes = null } = {}) {
   let blob;
 
@@ -84,7 +79,6 @@ export default async function handler(req, res) {
   }
 
   try {
-    // 🔴 FETCH DESDE BLOB SDK
     let data, schema;
     try {
       [data, schema] = await Promise.all([
@@ -95,12 +89,10 @@ export default async function handler(req, res) {
       return respondError(res, "fetch_error", e.message, trace_id);
     }
 
-    // 🔴 VALIDAR SCHEMA PARA RESPONSE
     if (!schema?.contract_id || !schema?.contract_version) {
       return respondError(res, "runtime_error", "invalid_schema_contract", trace_id);
     }
 
-    // 🔴 CONTROL TAMAÑO DATA
     if (!Array.isArray(data)) {
       return respondError(res, "runtime_error", "invalid_data_shape", trace_id);
     }
@@ -109,14 +101,12 @@ export default async function handler(req, res) {
       return respondError(res, "runtime_error", "dataset_too_large", trace_id);
     }
 
-    // 🔴 VALIDATE RUNTIME
     try {
       validateRuntime(data, schema);
     } catch (e) {
       return respondError(res, "runtime_error", e.message, trace_id);
     }
 
-    // 🔴 CONTRACT
     let prepared;
     try {
       prepared = applyContract(data, schema);
@@ -124,14 +114,12 @@ export default async function handler(req, res) {
       return respondError(res, "contract_error", e.message, trace_id);
     }
 
-    // 🔴 VALIDATE PREPARED
     try {
       validatePrepared(prepared, schema);
     } catch (e) {
       return respondError(res, "prepared_error", e.message, trace_id);
     }
 
-    // 🔴 VALIDAR METADATA COMPLETA
     if (
       !prepared?.metadata ||
       typeof prepared.metadata.n_raw !== "number" ||
@@ -142,7 +130,6 @@ export default async function handler(req, res) {
 
     const m = prepared.metadata;
 
-    // 🔴 SANEAR WARNINGS
     const warnings = {
       dataset_level: Array.isArray(prepared.warnings?.dataset_level)
         ? prepared.warnings.dataset_level
@@ -152,7 +139,6 @@ export default async function handler(req, res) {
         : []
     };
 
-    // 🔴 COMPUTE
     let result;
     try {
       result = computeDiagnostico(prepared);
@@ -160,7 +146,6 @@ export default async function handler(req, res) {
       return respondError(res, "compute_error", e.message, trace_id);
     }
 
-    // 🔴 VALIDAR RESULT REAL
     if (
       !result ||
       typeof result !== "object" ||
