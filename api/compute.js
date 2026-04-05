@@ -31,15 +31,20 @@ export default async function handler(req, res) {
   }
 
   try {
-    let data, schema;
+    let data, schema, codebook;
+
     try {
-      ({ data, schema } = await loadInputs());
+      ({ data, schema, codebook } = await loadInputs());
     } catch (e) {
       return respondError(res, "fetch_error", e.message, trace_id);
     }
 
     if (!schema?.contract_id || !schema?.contract_version) {
       return respondError(res, "runtime_error", "invalid_schema_contract", trace_id);
+    }
+
+    if (!codebook || typeof codebook !== "object" || !codebook.variables) {
+      return respondError(res, "runtime_error", "invalid_codebook", trace_id);
     }
 
     if (!Array.isArray(data)) {
@@ -50,21 +55,43 @@ export default async function handler(req, res) {
       return respondError(res, "runtime_error", "dataset_too_large", trace_id);
     }
 
+    const requestedTarget = req.body?.target_variable;
+    const targetVariable =
+      typeof requestedTarget === "string" && requestedTarget.trim() !== ""
+        ? requestedTarget.trim()
+        : schema?.input_contract?.target_variable;
+
+    if (!targetVariable) {
+      return respondError(res, "runtime_error", "missing_target_variable", trace_id);
+    }
+
+    if (!codebook?.variables?.[targetVariable]) {
+      return respondError(res, "runtime_error", `unknown_target_variable:${targetVariable}`, trace_id);
+    }
+
+    const runtimeSchema = {
+      ...schema,
+      input_contract: {
+        ...schema.input_contract,
+        target_variable: targetVariable
+      }
+    };
+
     try {
-      validateRuntime(data, schema);
+      validateRuntime(data, runtimeSchema);
     } catch (e) {
       return respondError(res, "runtime_error", e.message, trace_id);
     }
 
     let prepared;
     try {
-      prepared = applyContract(data, schema);
+      prepared = applyContract(data, runtimeSchema, codebook);
     } catch (e) {
       return respondError(res, "contract_error", e.message, trace_id);
     }
 
     try {
-      validatePrepared(prepared, schema);
+      validatePrepared(prepared, runtimeSchema);
     } catch (e) {
       return respondError(res, "prepared_error", e.message, trace_id);
     }
@@ -106,13 +133,14 @@ export default async function handler(req, res) {
     return res.status(200).json({
       trace_id,
       contract: {
-        id: schema.contract_id,
-        version: schema.contract_version
+        id: runtimeSchema.contract_id,
+        version: runtimeSchema.contract_version
       },
       execution: {
         duration_ms: Date.now() - start,
         n_raw: m.n_raw,
-        universo_final: m.universo_final
+        universo_final: m.universo_final,
+        target_variable: targetVariable
       },
       warnings,
       result
