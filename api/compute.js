@@ -1,8 +1,7 @@
 // /api/compute.js
 import crypto from "crypto";
-import fs from "fs/promises";
-import path from "path";
 
+import { loadInputs } from "../lib/runtime/loadInputs.js";
 import { validateRuntime } from "../lib/runtime/validateRuntime.js";
 import { validatePrepared } from "../lib/runtime/validatePrepared.js";
 
@@ -10,7 +9,6 @@ import { applyContract } from "../lib/ingest/applyContract.js";
 import { computeDiagnostico } from "../lib/engine/diagnostico.js";
 
 const MAX_DATA_ROWS = 1_000_000;
-const MAX_SCHEMA_BYTES = 200_000;
 
 function respondError(res, type, detail, trace_id) {
   const status =
@@ -24,30 +22,6 @@ function respondError(res, type, detail, trace_id) {
   return res.status(status).json({ error: type, detail, trace_id });
 }
 
-async function readJsonFile(relativePath, { maxBytes = null } = {}) {
-  const absolutePath = path.join(process.cwd(), relativePath);
-
-  let text;
-  try {
-    text = await fs.readFile(absolutePath, "utf8");
-  } catch {
-    throw new Error(`fetch_error:file_not_found:${relativePath}`);
-  }
-
-  if (maxBytes !== null) {
-    const size = new TextEncoder().encode(text).length;
-    if (size > maxBytes) {
-      throw new Error(`fetch_error:file_too_large:${relativePath}`);
-    }
-  }
-
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw new Error(`fetch_error:invalid_json:${relativePath}`);
-  }
-}
-
 export default async function handler(req, res) {
   const trace_id = crypto.randomUUID();
   const start = Date.now();
@@ -59,10 +33,7 @@ export default async function handler(req, res) {
   try {
     let data, schema;
     try {
-      [data, schema] = await Promise.all([
-        readJsonFile("data/data.json"),
-        readJsonFile("data/Schema_operativo.json", { maxBytes: MAX_SCHEMA_BYTES })
-      ]);
+      ({ data, schema } = await loadInputs());
     } catch (e) {
       return respondError(res, "fetch_error", e.message, trace_id);
     }
