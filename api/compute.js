@@ -21,7 +21,8 @@ export default async function handler(req, res) {
     return res.status(200).json(result);
   } catch (err) {
     return res.status(500).json({
-      status: "internal_error"
+      status: "internal_error",
+      error: err?.message || "unknown_error"
     });
   }
 }
